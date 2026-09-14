@@ -1,0 +1,153 @@
+# Multislice ptychography (tBL WSe2, Nguyen et al. 2025)
+# Mirrors ptycho_iter_05_multislice.ipynb cell-by-cell.
+
+device:
+  gpu_id: 0
+  default_device: gpu
+
+data:
+  raw_path: ~/data/example_data/Panel_g-h_Themis/scan_x128_y128.raw
+  name: tBL_WSe2
+  scan_shape: [128, 128]
+  dp_shape: [128, 128]
+  dtype: float32
+  gap_bytes: 1024
+  offset_bytes: 0
+  transpose_dp: true
+
+experiment:
+  probe_energy: 80000.0      # eV
+  probe_semiangle: 24.9      # mrad
+  probe_defocus: 0.0         # Angstrom
+  scan_step_size: 0.4290     # Angstrom
+
+model:
+  num_probes: 6
+  num_slices: 16
+  slice_thickness: 1.0
+  obj_type: potential
+
+preprocess:
+  com_fit_function: constant
+  force_com_rotation: 93.0
+  plot_rotation: true
+  plot_com: true
+  obj_padding_px: [32, 32]
+  batch_size: 128
+  bf_radius_pad: 2.0
+  df_inner_pad: 10.0
+  df_outer_factor: 5.0
+
+dip:
+  obj_pretrain_iters: 1500
+  probe_pretrain_iters: 100
+  pretrain_lr: 0.005
+  obj_final_activation: softplus
+  probe_start_filters: 32
+
+analysis:
+  center: [205, 72]
+  phi: 20.0
+  line_len: 60.0
+  linewidth: 10.0
+  cmap: viridis
+
+output:
+  dir: results
+  save_arrays: true
+  save_figures: true
+  show: false
+
+stages:
+  # 1) Pixelated baseline: identical slices, stable starting point.
+  - name: pixelated_baseline
+    kind: pixelated
+    num_iters: 5
+    reset: true
+    batch_size: 128
+    preprocess_batch_size: 128
+    store_snapshots_every: 5
+    optimizer:
+      optimizer: Adam
+      scheduler: Plateau
+      object_lr: 0.0001
+      probe_lr: 1.0
+    constraints:
+      identical_slices: true
+      fix_potential_baseline: true
+      fix_potential_baseline_factor: 0.75
+
+  # 2) Continue the baseline (bare `reconstruct(15)` in the notebook).
+  - name: pixelated_baseline_extra
+    kind: pixelated
+    init_from: pixelated_baseline
+    num_iters: 15
+    batch_size: 128
+    show_obj: true
+
+  # 3) Release the identical-slice constraint.
+  - name: pixelated_free
+    kind: pixelated
+    init_from: pixelated_baseline_extra
+    num_iters: 5
+    batch_size: 128
+    store_snapshots_every: 5
+    optimizer:
+      optimizer: Adam
+      scheduler: Plateau
+      object_lr: 0.0001
+      probe_lr: 1.0
+    constraints:
+      identical_slices: false
+      fix_potential_baseline: true
+      positivity_mode: shrink
+      fix_potential_baseline_factor: 0.05
+    linescan: true
+
+  # 4) Deep image prior, initialised from the pixelated baseline object.
+  - name: dip
+    kind: dip
+    init_from: pixelated_baseline_extra
+    num_iters: 5
+    reset: true
+    build_device: gpu
+    batch_size: 128
+    store_snapshots_every: 1
+    optimizer:
+      optimizer: AdamW
+      scheduler: Plateau
+      object_lr: 0.001
+      probe_lr: 0.001
+    constraints:
+      identical_slices: true
+      fix_potential_baseline: true
+      fix_potential_baseline_factor: 1.0
+    linescan: true
+
+  # 5) DIP with independent slices + TV / surface regularisation.
+  - name: dip_free
+    kind: dip
+    init_from: dip
+    num_iters: 10
+    batch_size: 128
+    optimizer:
+      optimizer: AdamW
+      scheduler: Plateau
+      object_lr: 0.001
+      probe_lr: 0.001
+    constraints:
+      identical_slices: false
+      fix_potential_baseline: true
+      fix_potential_baseline_factor: 1.0
+      tv_weight_z: 5.0
+      surface_zero_weight: 10.0
+    linescan: true
+
+  # 6) Extra DIP iterations with snapshots + depth-profile analysis.
+  - name: dip_free_extra
+    kind: dip
+    init_from: dip_free
+    num_iters: 10
+    store_snapshots_every: 5
+    linescan: true
+    depth_profile: true

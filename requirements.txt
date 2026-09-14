@@ -1,0 +1,6 @@
+quantem>=0.1.9
+torch>=2.4
+numpy>=1.24
+scikit-image>=0.22
+matplotlib>=3.8
+PyYAML>=6.0

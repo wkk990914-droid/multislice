@@ -1,0 +1,163 @@
+# Smoke test on a PYREX-simulated 4D-STEM dataset (HDF5).
+#
+# Source file name encodes the simulation parameters:
+#   FOV 5.0 nm, defocus 0 nm, alpha 25.0 mrad, dx 0.020 nm,
+#   R 256x256 (scan), Q 256x256 (diffraction).
+#
+# The scan / diffraction planes are cropped so the whole 6-stage chain runs in
+# minutes instead of hours. Iteration counts are deliberately tiny: this file
+# checks that every stage *executes*, not reconstruction quality.
+
+device:
+  gpu_id: 4
+  default_device: gpu
+  build_device: cpu
+
+data:
+  raw_path: PTYREX_8_FOV5.0nm_def0nm_alpha25.0mrad_dx0.020nm_R256x256_Q256x256_CL0.00082m_ro73deg_trueCL87.h5
+  group: data
+  dataset: frames
+  name: pyrextBL
+  scan_shape: [256, 256]
+  dp_shape: [256, 256]
+  dtype: float32
+  autodetect_axes: true
+  # Central sub-region used for the smoke test.
+  scan_crop: [96, 160, 96, 160]
+  dp_crop: [32, 224, 32, 224]
+  # From detector/dp_resolution = 1.2155 mrad/pixel.
+  # BF_radius_pixels 20.57 * 1.2155 = 25.0 mrad == alpha, so the calibration is
+  # self-consistent and the probe-disc fit is unnecessary.
+  dp_sampling_mrad: 1.2154998186711752
+
+experiment:
+  probe_energy: 300000.0     # eV - SOURCE-CONFIRMED for this simulation dataset
+  probe_semiangle: 25.0      # mrad (alpha in the file name)
+  probe_defocus: 0.0         # Angstrom (scan/defocus_nm = 0)
+  scan_step_size: 0.1953125  # Angstrom = scan/scale 0.01953125 nm
+
+model:
+  num_probes: 6
+  num_slices: 16
+  slice_thickness: 1.0
+  obj_type: potential
+
+preprocess:
+  com_fit_function: constant
+  force_com_rotation: 73.0   # detector/py4dstem_rot
+  plot_rotation: false
+  plot_com: false
+  obj_padding_px: [16, 16]
+  batch_size: 64
+  bf_radius_pad: 2.0
+  df_inner_pad: 10.0
+  df_outer_factor: 2.5
+
+dip:
+  obj_pretrain_iters: 200
+  probe_pretrain_iters: 50
+  pretrain_lr: 0.005
+  obj_final_activation: softplus
+  probe_start_filters: 32
+
+analysis:
+  center: [40, 40]
+  phi: 20.0
+  line_len: 30.0
+  linewidth: 6.0
+  cmap: viridis
+
+output:
+  dir: runs/pyrex_smoke
+  save_arrays: true
+  save_figures: true
+  show: false
+
+stages:
+  - name: pixelated_baseline
+    kind: pixelated
+    num_iters: 2
+    reset: true
+    batch_size: 64
+    preprocess_batch_size: 64
+    store_snapshots_every: 2
+    optimizer:
+      optimizer: Adam
+      scheduler: Plateau
+      object_lr: 0.0001
+      probe_lr: 1.0
+    constraints:
+      identical_slices: true
+      fix_potential_baseline: true
+      fix_potential_baseline_factor: 0.75
+
+  - name: pixelated_baseline_extra
+    kind: pixelated
+    init_from: pixelated_baseline
+    num_iters: 2
+    batch_size: 64
+    show_obj: true
+
+  - name: pixelated_free
+    kind: pixelated
+    init_from: pixelated_baseline_extra
+    num_iters: 2
+    batch_size: 64
+    store_snapshots_every: 2
+    optimizer:
+      optimizer: Adam
+      scheduler: Plateau
+      object_lr: 0.0001
+      probe_lr: 1.0
+    constraints:
+      identical_slices: false
+      fix_potential_baseline: true
+      positivity_mode: shrink
+      fix_potential_baseline_factor: 0.05
+    linescan: true
+
+  - name: dip
+    kind: dip
+    init_from: pixelated_baseline_extra
+    num_iters: 2
+    reset: true
+    build_device: gpu
+    batch_size: 64
+    store_snapshots_every: 2
+    optimizer:
+      optimizer: AdamW
+      scheduler: Plateau
+      object_lr: 0.001
+      probe_lr: 0.001
+    constraints:
+      identical_slices: true
+      fix_potential_baseline: true
+      fix_potential_baseline_factor: 1.0
+    linescan: true
+
+  - name: dip_free
+    kind: dip
+    init_from: dip
+    num_iters: 2
+    batch_size: 64
+    optimizer:
+      optimizer: AdamW
+      scheduler: Plateau
+      object_lr: 0.001
+      probe_lr: 0.001
+    constraints:
+      identical_slices: false
+      fix_potential_baseline: true
+      fix_potential_baseline_factor: 1.0
+      tv_weight_z: 5.0
+      surface_zero_weight: 10.0
+    linescan: true
+
+  - name: dip_free_extra
+    kind: dip
+    init_from: dip_free
+    num_iters: 2
+    store_snapshots_every: 2
+    batch_size: 64
+    linescan: true
+    depth_profile: true
